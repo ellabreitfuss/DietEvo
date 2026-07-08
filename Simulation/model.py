@@ -9,7 +9,7 @@ The model currently contains:
 4. Individual health-status updating
 5. Repeated simulation over time
 
-No diet categories are defined yet.
+No diet categories are defined.
 
 Instead, agents are represented as points in a 2D intention space:
 
@@ -61,6 +61,7 @@ class ModelParameters:
     household_weight: float = 0.8
     friendship_weight: float = 0.2
 
+    # learning rate instead transformation from intention to behavior?
     norm_learning_rate: float = 0.25
     attitude_learning_rate: float = 0.10
     health_status_learning_rate: float = 0.10
@@ -133,11 +134,6 @@ def average_neighbor_intention(
     """
     Calculate the average intention of neighbors in one graph layer.
 
-    If an agent has no neighbors in this layer, the function returns
-    the agent's own intention for that layer.
-
-    This avoids missing values and means:
-        "If nobody influences me in this layer, I keep my own reference point."
     """
 
     averages = np.zeros(n_agents)
@@ -152,10 +148,9 @@ def average_neighbor_intention(
 
     return averages
 
-
 def update_norms(model: FoodTransitionModel) -> None:
     """
-    Update perceived norms through household and friendship influence.
+    Update perceived norms through household and friendship influence. This is where ABM and the social Network are interacting. 
 
     The model first calculates the average intention in each social layer:
 

@@ -110,7 +110,7 @@ def initialize_agents(
     intention_health = np.zeros(n_agents)
 
     # Initial individual health status.
-    # For now, this is random. Later, you can initialize it from empirical data.
+    # For now, this is random. Later, we can initialize it from empirical data.
     individual_health_status = random_grid_values(
         n_agents,
         seed=rng.integers(1_000_000),
