@@ -1,4 +1,3 @@
-# network/households.py
 """
 Household network generation for the food-transition ABM.
 

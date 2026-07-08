@@ -1,4 +1,3 @@
-# network/friendships.py
 """
 Friendship network generation for the food-transition ABM.
 
