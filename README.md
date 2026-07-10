@@ -360,7 +360,7 @@ Potential future developments include
 If you use this model, please cite
 
 ```
-Author (2025)
+Ella Breitfuß, Bruno Galvao, Faith Sadiq, Marlene Rimmert (2025)
 
 Food Transition Agent-Based Model
 GitHub Repository
