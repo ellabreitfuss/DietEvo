@@ -35,13 +35,6 @@ import numpy as np
 
 @dataclass
 class AgentState:
-    """
-    Stores all agent-level variables as NumPy arrays.
-
-    Each array has length n_agents.
-    The value at index i belongs to agent i.
-    """
-
     env_attitudes: np.ndarray
     env_norms: np.ndarray
     env_PBC: np.ndarray
@@ -53,18 +46,16 @@ class AgentState:
     intention_env: np.ndarray
     intention_health: np.ndarray
 
+    behavior_env: np.ndarray
+    behavior_health: np.ndarray
+
     individual_health_status: np.ndarray
 
 
-def random_grid_values(
-    n_agents: int,
-    seed: int | None = None,
-) -> np.ndarray:
+def random_grid_values(n_agents: int, seed: int | None = None) -> np.ndarray:
     """
-    Generate random values between 0 and 1 in steps of 0.1.
-
-    Example possible values:
-        0.0, 0.1, 0.2, ..., 1.0
+    Generate random values from:
+    0.0, 0.1, 0.2, ..., 1.0
     """
 
     rng = np.random.default_rng(seed)
@@ -72,49 +63,68 @@ def random_grid_values(
     return rng.choice(grid, size=n_agents)
 
 
-def initialize_agents(
-    n_agents: int,
-    seed: int | None = None,
-) -> AgentState:
+def initialize_agents(n_agents: int, seed: int | None = None) -> AgentState:
     """
-    Initialize all agent variables randomly.
+    Initialize agents with normally distributed attitudes and norms.
 
-    Parameters
-    ----------
-    n_agents:
-        Number of agents in the model.
-
-    seed:
-        Random seed for reproducibility.
-
-    Returns
-    -------
-    AgentState
-        Dataclass containing all initialized agent variables.
+    Attitudes and norms are sampled from a truncated normal distribution
+    centered at 0.5 (σ = 0.2), clipped to [0, 1], and rounded to the
+    nearest 0.1.
     """
 
     if n_agents <= 0:
-        raise ValueError("n_agents must be a positive integer.")
+        raise ValueError("n_agents must be positive.")
 
     rng = np.random.default_rng(seed)
 
-    env_attitudes = random_grid_values(n_agents, seed=rng.integers(1_000_000))
-    env_norms = random_grid_values(n_agents, seed=rng.integers(1_000_000))
-    env_PBC = random_grid_values(n_agents, seed=rng.integers(1_000_000))
+    # ----------------------------------------------------------
+    # Initial attitude and norm distribution
+    # ----------------------------------------------------------
 
-    health_attitudes = random_grid_values(n_agents, seed=rng.integers(1_000_000))
-    health_norms = random_grid_values(n_agents, seed=rng.integers(1_000_000))
-    health_PBC = random_grid_values(n_agents, seed=rng.integers(1_000_000))
+    INITIAL_MEAN = 0.2
+    INITIAL_STD = 0.1
+    GRID = np.arange(0.0, 1.01, 0.1)
+
+    def sample_initial_values() -> np.ndarray:
+        """Sample values from a truncated Gaussian distribution."""
+        values = np.clip(
+            rng.normal(
+                loc=INITIAL_MEAN,
+                scale=INITIAL_STD,
+                size=n_agents,
+            ),
+            0.0,
+            1.0,
+        )
+
+        # Map every value to the nearest grid point (0.0, 0.1, ..., 1.0)
+        return GRID[np.abs(values[:, None] - GRID).argmin(axis=1)]
+
+    env_attitudes = sample_initial_values()
+    env_norms = sample_initial_values()
+
+    health_attitudes = sample_initial_values()
+    health_norms = sample_initial_values()
+
+    # ----------------------------------------------------------
+    # Perceived behavioural control
+    # ----------------------------------------------------------
+
+    env_PBC = np.full(n_agents, 0.5)
+    health_PBC = np.full(n_agents, 0.8)
+
+    # ----------------------------------------------------------
+    # Dynamic variables
+    # ----------------------------------------------------------
 
     intention_env = np.zeros(n_agents)
     intention_health = np.zeros(n_agents)
 
-    # Initial individual health status.
-    # For now, this is random. Later, we can initialize it from empirical data.
-    individual_health_status = random_grid_values(
-        n_agents,
-        seed=rng.integers(1_000_000),
-    )
+    behavior_env = np.zeros(n_agents)
+    behavior_health = np.zeros(n_agents)
+
+    # Calculated during model initialization
+    individual_health_status = np.zeros(n_agents)
 
     return AgentState(
         env_attitudes=env_attitudes,
@@ -125,5 +135,7 @@ def initialize_agents(
         health_PBC=health_PBC,
         intention_env=intention_env,
         intention_health=intention_health,
+        behavior_env=behavior_env,
+        behavior_health=behavior_health,
         individual_health_status=individual_health_status,
     )

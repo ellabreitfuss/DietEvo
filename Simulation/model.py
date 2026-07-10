@@ -17,7 +17,8 @@ Instead, agents are represented as points in a 2D intention space:
     y-axis = individual-health intention
 """
 
-from dataclasses import dataclass
+
+from dataclasses import dataclass, field
 import numpy as np
 import networkx as nx
 
@@ -27,87 +28,98 @@ from Simulation.agents import AgentState
 @dataclass
 class ModelParameters:
     """
-    Stores all behavioral parameters of the ABM.
-
-    intention_weight_attitude:
-        Weight of attitudes in intention formation.
-
-    intention_weight_norm:
-        Weight of perceived norms in intention formation.
-
-    intention_weight_PBC:
-        Weight of perceived behavioral control in intention formation.
-
-    household_weight:
-        Importance of household members for norm updating.
-
-    friendship_weight:
-        Importance of friends for norm updating.
-
-    norm_learning_rate:
-        Speed at which perceived norms move toward neighbors' intentions.
-
-    attitude_learning_rate:
-        Speed at which attitudes respond to health system states.
-
-    health_status_learning_rate:
-        Speed at which individual health status responds to behavior.
+    Behavioral and system parameters.
     """
 
-    intention_weight_attitude: float = 0.4
-    intention_weight_norm: float = 0.4
-    intention_weight_PBC: float = 0.2
+    # Theory of Planned Behavior
+    intention_weight_attitude: float = 0.40
+    intention_weight_norm: float =  0.25
+    intention_weight_PBC: float = 0.35
 
-    household_weight: float = 0.8
-    friendship_weight: float = 0.2
+    # Intention-behavior thresholds
+    threshold_health: float =  0.08  #0.08 if low: IH status higher than env status
+    threshold_env: float =  0.1    #0.10 if high: IH higher
 
-    # learning rate instead transformation from intention to behavior?
-    norm_learning_rate: float = 0.25
-    attitude_learning_rate: float = 0.10
-    health_status_learning_rate: float = 0.10
+    # Attitude update weights
+    attitude_weight_health: float = 0.10
+    attitude_weight_env: float =  0.10
+
+    # Norm update weights
+    household_weight: float = 0.80 #change doesnt change the outcome if random 
+    friendship_weight: float = 0.20
+    motivation_to_comply: float = 0.25   #0.80   #influence on norms
+
+    # Health-status update weights
+    individual_health_weight_previous: float = 0.50
+    individual_health_weight_behavior: float = 0.30
+    individual_health_weight_environment: float = 0.15
+    individual_health_weight_noise: float = 0.05
+
+    # Environmental-health update weights
+    env_health_weight_previous: float =  0.60
+    env_health_weight_behavior: float = 0.35
+    env_health_weight_noise: float =  0.05
+
+    # Noise
+    noise_mean: float = 0.5   #0.5 if over 0 EH and PH are bigger 
+    noise_sd: float =  0.1  #0.1
 
 
 @dataclass
 class FoodTransitionModel:
     """
     Full ABM object.
-
-    agents:
-        Agent-level variables.
-
-    household_graph:
-        NetworkX graph containing household ties.
-
-    friendship_graph:
-        NetworkX graph containing friendship ties.
-
-    planetary_health_status:
-        Global system-level variable.
-
-        Scale:
-            0 = very bad planetary health
-            1 = very good planetary health
     """
 
     agents: AgentState
     household_graph: nx.Graph
     friendship_graph: nx.Graph
     parameters: ModelParameters
-    planetary_health_status: float = 0.2
+    environmental_health_status: float = 0.2
+
+    # Needed because your environmental attitude equation compares EH_t to EH_t-5.
+    environmental_health_history: list[float] = field(default_factory=list)
+
+
+def validate_parameters(p: ModelParameters) -> None:
+    """
+    Validate parameter consistency.
+    """
+
+    if not np.isclose(
+        p.intention_weight_attitude
+        + p.intention_weight_norm
+        + p.intention_weight_PBC,
+        1.0,
+    ):
+        raise ValueError("Intention weights must sum to 1.")
+
+    if not np.isclose(p.household_weight + p.friendship_weight, 1.0):
+        raise ValueError("Household and friendship weights must sum to 1.")
+
+    if not np.isclose(
+        p.individual_health_weight_previous
+        + p.individual_health_weight_behavior
+        + p.individual_health_weight_environment
+        + p.individual_health_weight_noise,
+        1.0,
+    ):
+        raise ValueError("Individual health-status weights must sum to 1.")
+
+    if not np.isclose(
+        p.env_health_weight_previous
+        + p.env_health_weight_behavior
+        + p.env_health_weight_noise,
+        1.0,
+    ):
+        raise ValueError("Environmental health-status weights must sum to 1.")
 
 
 def calculate_intentions(model: FoodTransitionModel) -> None:
     """
-    Calculate intention coordinates for every agent.
+    Calculate intention from attitude, norm, and PBC.
 
-    Intention follows a TPB-style weighted sum:
-
-        intention = 0.4 * attitude + 0.4 * norm + 0.2 * PBC
-
-    This is calculated separately for:
-
-        - environmental / planetary-health intention
-        - individual-health intention
+    I = w_A * A + w_N * N + w_PBC * PBC
     """
 
     p = model.parameters
@@ -125,205 +137,392 @@ def calculate_intentions(model: FoodTransitionModel) -> None:
         + p.intention_weight_PBC * a.health_PBC
     )
 
+    a.intention_env = np.clip(a.intention_env, 0, 1)
+    a.intention_health = np.clip(a.intention_health, 0, 1)
 
-def average_neighbor_intention(
-    graph: nx.Graph,
-    intentions: np.ndarray,
-    n_agents: int,
-) -> np.ndarray:
+
+def initialize_behavior_from_intention(model: FoodTransitionModel) -> None:
     """
-    Calculate the average intention of neighbors in one graph layer.
+    Initial behavior calculation.
 
+    According to your team decision:
+
+    B(0) = I(0) * PBC
+    """
+
+    a = model.agents
+
+    a.behavior_env = a.intention_env * a.env_PBC
+    a.behavior_health = a.intention_health * a.health_PBC
+
+    a.behavior_env = np.clip(a.behavior_env, 0, 1)
+    a.behavior_health = np.clip(a.behavior_health, 0, 1)
+
+def initialize_individual_health_status(model: FoodTransitionModel) -> None:
+    """
+    Calculate initial individual health status from initial behavior,
+    environmental health status, and noise.
+
+    This avoids randomly setting IH at the beginning.
+
+    Initial version:
+
+        IH_0 =
+            w_behavior * B_IH,0
+            + w_environment * EH_0
+            + w_noise * noise
+
+    The previous-health term is not used at initialization because
+    there is no IH_{t-1} yet.
+    """
+
+    p = model.parameters
+    a = model.agents
+
+    rng = np.random.default_rng()
+    noise = rng.normal(
+        p.noise_mean,
+        p.noise_sd,
+        size=len(a.behavior_health),
+    )
+    noise = np.clip(noise, 0, 1)
+
+    total_weight = (
+        p.individual_health_weight_behavior
+        + p.individual_health_weight_environment
+        + p.individual_health_weight_noise
+    )
+
+    a.individual_health_status = (
+        p.individual_health_weight_behavior * a.behavior_health
+        + p.individual_health_weight_environment * model.environmental_health_status
+        + p.individual_health_weight_noise * noise
+    ) / total_weight
+
+    a.individual_health_status = np.clip(a.individual_health_status, 0, 1)
+
+
+def initialize_model_state(model: FoodTransitionModel) -> None:
+    """
+    Initialize model state before the first simulation step.
+
+    Order:
+    1. Validate parameters.
+    2. Store initial environmental health.
+    3. Calculate initial intentions.
+    4. Calculate initial behavior.
+    5. Calculate initial individual health status.
+
+    Important:
+    Individual health is calculated.
+    """
+
+    validate_parameters(model.parameters)
+
+    calculate_intentions(model)
+    initialize_behavior_from_intention(model)
+    initialize_individual_health_status(model)
+
+def average_neighbor_value(
+    graph: nx.Graph,
+    values: np.ndarray,
+    n_agents: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate average neighbor value for one network layer.
+
+    Returns
+    -------
+    averages:
+        Average value of neighbors.
+
+    has_neighbors:
+        Boolean array.
+        True if the agent has at least one neighbor in this layer.
+        False if the agent has no neighbors in this layer.
     """
 
     averages = np.zeros(n_agents)
+    has_neighbors = np.zeros(n_agents, dtype=bool)
 
     for agent in range(n_agents):
         neighbors = list(graph.neighbors(agent))
 
-        if len(neighbors) == 0:
-            averages[agent] = intentions[agent]
-        else:
-            averages[agent] = np.mean(intentions[neighbors])
+        if len(neighbors) > 0:
+            averages[agent] = np.mean(values[neighbors])
+            has_neighbors[agent] = True
 
-    return averages
+    return averages, has_neighbors
+
 
 def update_norms(model: FoodTransitionModel) -> None:
     """
-    Update perceived norms through household and friendship influence. This is where ABM and the social Network are interacting. 
+    Update subjective norms from connected agents' observed behavior.
 
-    The model first calculates the average intention in each social layer:
+    Important:
+    Norms are updated from behavior, not intention.
 
-        H_i = average household intention
-        F_i = average friendship intention
-
-    Then it combines them:
-
-        neighbor_intention_i = 0.8 * H_i + 0.2 * F_i
-
-    Finally, perceived norms move gradually toward that neighborhood intention:
-
-        N_i(t+1) = (1 - alpha) * N_i(t) + alpha * neighbor_intention_i
-
-    This is done separately for the environmental and health dimensions.
+    If an agent has no household and no friendship neighbors,
+    its norm remains unchanged.
     """
 
     p = model.parameters
     a = model.agents
-    n_agents = len(a.intention_env)
+    n_agents = len(a.env_norms)
 
-    household_env = average_neighbor_intention(
+    h_env, has_h_env = average_neighbor_value(
         model.household_graph,
-        a.intention_env,
+        a.behavior_env,
         n_agents,
     )
 
-    friendship_env = average_neighbor_intention(
+    f_env, has_f_env = average_neighbor_value(
         model.friendship_graph,
-        a.intention_env,
+        a.behavior_env,
         n_agents,
     )
 
-    neighbor_env = (
-        p.household_weight * household_env
-        + p.friendship_weight * friendship_env
-    )
-
-    household_health = average_neighbor_intention(
+    h_health, has_h_health = average_neighbor_value(
         model.household_graph,
-        a.intention_health,
+        a.behavior_health,
         n_agents,
     )
 
-    friendship_health = average_neighbor_intention(
+    f_health, has_f_health = average_neighbor_value(
         model.friendship_graph,
-        a.intention_health,
+        a.behavior_health,
         n_agents,
     )
 
-    neighbor_health = (
-        p.household_weight * household_health
-        + p.friendship_weight * friendship_health
+    has_any_env_neighbor = has_h_env | has_f_env
+    has_any_health_neighbor = has_h_health | has_f_health
+
+    descriptive_norm_env = (
+        p.household_weight * h_env
+        + p.friendship_weight * f_env
     )
 
-    alpha = p.norm_learning_rate
-
-    a.env_norms = (1 - alpha) * a.env_norms + alpha * neighbor_env
-    a.health_norms = (1 - alpha) * a.health_norms + alpha * neighbor_health
-
-    a.env_norms = np.clip(a.env_norms, 0, 1)
-    a.health_norms = np.clip(a.health_norms, 0, 1)
-
-
-def update_attitudes(model: FoodTransitionModel) -> None:
-    """
-    Update attitudes based on planetary and individual health status.
-
-    Environmental attitude:
-        If planetary health is bad, environmental concern increases.
-
-        planetary_concern = 1 - planetary_health_status
-
-    Health attitude:
-        If individual health status is bad, health concern increases.
-
-        health_concern_i = 1 - individual_health_status_i
-    """
-
-    p = model.parameters
-    a = model.agents
-
-    mu = p.attitude_learning_rate
-
-    planetary_concern = 1 - model.planetary_health_status
-    health_concern = 1 - a.individual_health_status
-
-    a.env_attitudes = (
-        (1 - mu) * a.env_attitudes
-        + mu * planetary_concern
+    descriptive_norm_health = (
+        p.household_weight * h_health
+        + p.friendship_weight * f_health
     )
 
-    a.health_attitudes = (
-        (1 - mu) * a.health_attitudes
-        + mu * health_concern
+    m = p.motivation_to_comply
+
+    new_env_norms = a.env_norms.copy()
+    new_health_norms = a.health_norms.copy()
+
+    new_env_norms[has_any_env_neighbor] = (
+        (1 - m) * a.env_norms[has_any_env_neighbor]
+        + m * descriptive_norm_env[has_any_env_neighbor]
     )
 
-    a.env_attitudes = np.clip(a.env_attitudes, 0, 1)
-    a.health_attitudes = np.clip(a.health_attitudes, 0, 1)
+    new_health_norms[has_any_health_neighbor] = (
+        (1 - m) * a.health_norms[has_any_health_neighbor]
+        + m * descriptive_norm_health[has_any_health_neighbor]
+    )
+
+    a.env_norms = np.clip(new_env_norms, 0, 1)
+    a.health_norms = np.clip(new_health_norms, 0, 1)
 
 
 def update_individual_health_status(model: FoodTransitionModel) -> None:
     """
     Update individual health status.
 
-    For now, we assume that stronger environmental intention also represents
-    healthier behavior.
-
-    This is a simplifying assumption from your current model idea:
-
-        behavior is represented by the environmental intention coordinate.
-
-    Therefore:
-
-        individual_health_status moves toward intention_env
-
-    Later, this can be replaced by a more detailed behavior-health function.
+    IH_t =
+        w0 * IH_t-1
+        + w1 * B_IH,t-1
+        + w2 * EH_t
+        + w3 * noise
     """
 
     p = model.parameters
     a = model.agents
 
-    rho = p.health_status_learning_rate
+    rng = np.random.default_rng()
+    noise = rng.normal(p.noise_mean, p.noise_sd, size=len(a.individual_health_status))
+    noise = np.clip(noise, 0, 1)
 
     a.individual_health_status = (
-        (1 - rho) * a.individual_health_status
-        + rho * a.intention_env
+        p.individual_health_weight_previous * a.individual_health_status
+        + p.individual_health_weight_behavior * a.behavior_health
+        + p.individual_health_weight_environment * model.environmental_health_status
+        + p.individual_health_weight_noise * noise
     )
 
     a.individual_health_status = np.clip(a.individual_health_status, 0, 1)
 
 
+def update_environmental_health_status(model: FoodTransitionModel) -> None:
+    """
+    Update global environmental health status.
+
+    EH_t =
+        w0 * EH_t-1
+        + w1 * mean(B_EH)
+        + w2 * noise
+
+    """
+
+    p = model.parameters
+    a = model.agents
+
+    rng = np.random.default_rng()
+    noise = float(np.clip(rng.normal(p.noise_mean, p.noise_sd), 0, 1))
+
+    mean_env_behavior = float(np.mean(a.behavior_env))
+
+    model.environmental_health_status = (
+        p.env_health_weight_previous * model.environmental_health_status
+        + p.env_health_weight_behavior * mean_env_behavior
+        + p.env_health_weight_noise * noise
+    )
+
+    model.environmental_health_status = float(
+        np.clip(model.environmental_health_status, 0, 1)
+    )
+
+    model.environmental_health_history.append(model.environmental_health_status)
+
+
+def update_attitudes(model: FoodTransitionModel) -> None:
+    """
+    Update individual-health and environmental attitudes.
+
+    Individual-health attitude
+    --------------------------
+    The IH attitude follows:
+
+        A_IH,i,t =
+            A_IH,i,t-1
+            + w_A,IH
+              * (1 - A_IH,i,t-1)
+              * (1 - IH_i,t)
+
+    Interpretation:
+        - Poor individual health increases health concern.
+        - Good individual health causes little or no increase.
+        - Health attitude cannot decrease.
+
+    Environmental attitude
+    ----------------------
+    Environmental attitude follows a target-seeking equation:
+
+        A_EH,i,t =
+            A_EH,i,t-1
+            + w_A,EH
+              * ((1 - EH_t) - A_EH,i,t-1)
+
+    Interpretation:
+        - Poor environmental health increases environmental concern.
+        - Improving environmental health reduces environmental concern.
+    """
+
+    p = model.parameters
+    a = model.agents
+
+    # ==========================================================
+    # Individual-health attitudes
+    # ==========================================================
+
+    a.health_attitudes = (
+        a.health_attitudes
+        + p.attitude_weight_health
+        * (1.0 - a.health_attitudes)
+        * (1.0 - a.individual_health_status)
+    )
+
+    # ==========================================================
+    # Environmental attitudes
+    # ==========================================================
+
+    target_env_attitude = 1.0 - model.environmental_health_status
+
+    a.env_attitudes = (
+        a.env_attitudes
+        + p.attitude_weight_env
+        * (target_env_attitude - a.env_attitudes)
+    )
+
+    # Keep values within [0, 1]
+    a.health_attitudes = np.clip(a.health_attitudes, 0.0, 1.0)
+    a.env_attitudes = np.clip(a.env_attitudes, 0.0, 1.0)
+
+
+def update_behavior(model: FoodTransitionModel) -> None:
+    """
+    Update dietary behavior with threshold rule.
+
+    Team decision:
+
+    B_target = I * PBC
+
+    Behavior only changes if the difference between previous behavior
+    and current intention is large enough.
+
+    For implementation, we use the target behavior in the comparison:
+
+        abs(B_previous - B_target) >= threshold
+
+    This is more internally consistent than comparing B_previous to I only,
+    because actual target behavior includes PBC.
+    """
+
+    p = model.parameters
+    a = model.agents
+
+    target_env = a.intention_env * a.env_PBC
+    target_health = a.intention_health * a.health_PBC
+
+    change_env = np.abs(a.behavior_env - target_env) >= p.threshold_env
+    change_health = np.abs(a.behavior_health - target_health) >= p.threshold_health
+
+    a.behavior_env[change_env] = target_env[change_env]
+    a.behavior_health[change_health] = target_health[change_health]
+
+    a.behavior_env = np.clip(a.behavior_env, 0, 1)
+    a.behavior_health = np.clip(a.behavior_health, 0, 1)
+
 def step(model: FoodTransitionModel) -> None:
     """
-    Run one simulation step.
+    Run one model step.
 
-    Order of events:
-
-    1. Calculate intentions from current attitudes, norms, and PBC.
-    2. Update norms based on connected agents' intentions.
-    3. Update health status based on behavior proxy.
-    4. Update attitudes based on planetary and individual health status.
-    5. Recalculate intentions after all updates.
-
-    The final recalculation makes the stored intention values consistent
-    with the updated state at the end of the step.
+    Order:
+    1. Environmental health status
+    2. Individual health status
+    3. Attitudes
+    4. Norms
+    5. Intentions
+    6. Behavior
     """
 
-    calculate_intentions(model)
-    update_norms(model)
+    update_environmental_health_status(model)
     update_individual_health_status(model)
     update_attitudes(model)
+    update_norms(model)
     calculate_intentions(model)
+    update_behavior(model)
 
 
-def run_model(
-    model: FoodTransitionModel,
-    n_steps: int,
-) -> dict[str, list[float]]:
+def run_model(model: FoodTransitionModel, n_steps: int) -> dict[str, list[float]]:
     """
-    Run the ABM for multiple steps.
-
-    Returns a history dictionary with aggregate values over time.
+    Run model for n_steps and store aggregate outputs.
     """
+
+    initialize_model_state(model)
 
     history = {
-        "mean_intention_env": [],
-        "mean_intention_health": [],
+        "environmental_health_status": [],
+        "mean_individual_health_status": [],
         "mean_env_attitude": [],
         "mean_health_attitude": [],
         "mean_env_norm": [],
         "mean_health_norm": [],
-        "mean_individual_health_status": [],
+        "mean_intention_env": [],
+        "mean_intention_health": [],
+        "mean_behavior_env": [],
+        "mean_behavior_health": [],
     }
 
     for _ in range(n_steps):
@@ -331,14 +530,19 @@ def run_model(
 
         a = model.agents
 
-        history["mean_intention_env"].append(float(np.mean(a.intention_env)))
-        history["mean_intention_health"].append(float(np.mean(a.intention_health)))
+        history["environmental_health_status"].append(
+            model.environmental_health_status
+        )
+        history["mean_individual_health_status"].append(
+            float(np.mean(a.individual_health_status))
+        )
         history["mean_env_attitude"].append(float(np.mean(a.env_attitudes)))
         history["mean_health_attitude"].append(float(np.mean(a.health_attitudes)))
         history["mean_env_norm"].append(float(np.mean(a.env_norms)))
         history["mean_health_norm"].append(float(np.mean(a.health_norms)))
-        history["mean_individual_health_status"].append(
-            float(np.mean(a.individual_health_status))
-        )
+        history["mean_intention_env"].append(float(np.mean(a.intention_env)))
+        history["mean_intention_health"].append(float(np.mean(a.intention_health)))
+        history["mean_behavior_env"].append(float(np.mean(a.behavior_env)))
+        history["mean_behavior_health"].append(float(np.mean(a.behavior_health)))
 
     return history
